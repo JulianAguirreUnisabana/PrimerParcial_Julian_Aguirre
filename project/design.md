@@ -1,203 +1,240 @@
-# Diseño del agente
+# Diseño del agente de planificación
 
-Este documento debe completarse **antes** de la implementación principal del agente.
+## Descripción del archivo
 
-Use sus propias palabras y notación. No reemplace este archivo por una transcripción
-del enunciado. Las subsecciones existen para que no se le olvide una decisión;
-usted decide el contenido.
+Este documento describe el problema de planificación de la misión Emergency Control y define el modelo de inteligencia artificial que utilizará el backend. Primero se explica el entorno, el estado y las reglas del mundo. Después se presenta UCS como estrategia de referencia para los casos de optimalidad y una búsqueda satisficiente con poda de estados para resolver rápidamente la misión completa.
 
-El entorno, según las propiedades vistas en clase, es totalmente observable,
-determinista, secuencial, estático, discreto y de agente único. Bajo esas
-condiciones la solución es un **plan completo** y el marco correcto es la
-búsqueda clásica. Justifique cada componente con ese marco (AIMA, cap. 3).
+El robot debe desplazarse por varias zonas, recoger llaves, herramientas y materiales, abrir puertas, reparar paneles y activar estaciones. Cada acción tiene un costo y consume batería. La misión termina cuando todas las estaciones indicadas por el escenario están en estado `ONLINE`.
 
----
+El entorno es totalmente observable, determinista, secuencial, estático, discreto y de agente único. Por esto se modela como un problema clásico de búsqueda. El backend recibe el escenario en `POST /api/solve` y devuelve un plan usando las operaciones del contrato: `MOVE`, `PICKUP`, `DROP` e `INTERACT`.
 
 ## Estado
 
 ### Definición formal
 
-Escriba la tupla de estado. Cada componente debe ser una variable que el robot
-necesita para saber qué podrá hacer después.
+El estado físico se representa como:
 
 ```text
-s = ⟨ … ⟩
+s = <zona, bateria, carga, suelo, puertas, paneles, estaciones>
 ```
 
-(completar)
+- `zona`: ubicación actual del robot.
+- `bateria`: energía restante.
+- `carga`: objetos que transporta el robot.
+- `suelo`: ubicación de llaves, herramientas y materiales que no están en la carga.
+- `puertas`: estado de cada puerta, abierta o cerrada.
+- `paneles`: estado de cada panel, dañado o reparado.
+- `estaciones`: estado de cada estación, offline u online.
+
+Esta información es suficiente para determinar qué acciones pueden ejecutarse y cuál sería su resultado.
 
 ### Por qué cada variable es necesaria
 
-Criterio de clase (`Applicable`): una variable pertenece al estado **si y solo si**
-dos configuraciones que difieran en ella pueden diferir en las acciones legales
-futuras o en su resultado.
+La zona determina qué objetos están disponibles, qué puertas puede abrir el robot, qué paneles puede reparar, qué estaciones puede operar y qué movimientos son posibles.
 
-Pase ese filtro con cada variable. En particular:
+La batería es parte del estado porque todas las acciones tienen un costo. Dos estados iguales en todo excepto en la batería pueden tener diferentes acciones futuras disponibles.
 
-- la **batería** forma parte de la situación física (§2.1 del enunciado);
-- la **posición de los objetos** no se deduce del escenario inicial si el robot
-  puede soltarlos (`DROP`);
-- los cambios permanentes (puertas, paneles, estaciones) condicionan el futuro.
+La carga es necesaria para saber si el robot posee una llave, herramienta o material y para comprobar la capacidad de transporte.
 
-(completar)
+El suelo es necesario porque el robot puede usar `DROP` y luego recoger un objeto en otra zona o en otra etapa del plan.
 
-### Qué información se deriva y NO se almacena
+Las puertas, paneles y estaciones también pertenecen al estado porque sus cambios son permanentes y modifican las acciones futuras. Una puerta abierta permite cruzar un corredor, un panel reparado habilita una estación y una estación online puede ser requisito de otra.
 
-Peso de la carga, grafo de corredores, costos, capacidad, batería máxima, etc.
-Si se puede calcular a partir del estado y de las constantes del escenario, no
-es una variable de estado.
+### Qué información se deriva y no se almacena
 
-(completar)
+El grafo de corredores, los costos, la capacidad de carga, la batería máxima, las dependencias y las zonas de recarga son constantes tomadas del escenario. No se repiten dentro de cada estado.
+
+El peso de la carga se deriva sumando el peso de sus objetos. También se derivan las acciones aplicables comprobando las reglas del escenario, por ejemplo si una llave abre una puerta o si una herramienta y un material permiten reparar un panel.
 
 ### Qué pertenece al historial de búsqueda y no al estado físico
 
-`g(n)`, el padre y la acción que trajo aquí describen *cómo llegó*, no *dónde
-está*. Viven en el **Nodo**. Si se meten en el estado, CLOSED no puede reconocer
-la misma situación física alcanzada por dos rutas.
+El costo acumulado `g(n)`, el padre del nodo y la acción que produjo el nodo pertenecen al historial de búsqueda. Se conservan para reconstruir el plan, pero no describen la situación física.
 
-(completar)
+Si se incluyera el camino recorrido dentro del estado, dos rutas que llegan a la misma configuración se considerarían diferentes y se repetiría trabajo innecesario.
 
 ### Cuándo dos configuraciones son el mismo estado
 
-Materiales equivalentes por tipo (§2.2): no les ponga ids artificiales.
-Estructuras canónicas (conjuntos, contadores) para que `==` y el hash coincidan
-con la equivalencia física. Sin eso Graph Search explota.
+Dos configuraciones son el mismo estado si tienen la misma zona, batería, carga, suelo y estados de puertas, paneles y estaciones. El orden en que se recogieron los objetos no cambia la situación física.
 
-(completar)
+Los materiales del mismo tipo se representan mediante cantidades, no mediante identificadores artificiales. Antes de almacenarse en `CLOSED`, el estado se canonicaliza ordenando sus colecciones y usando una representación inmutable. Así, estados físicamente equivalentes tienen la misma clave de comparación.
 
 ### Relevancia: objetos que ya no cambian el futuro
 
-Los cambios del entorno son **monótonos** (una puerta abierta no se cierra).
-Pregúntese: una llave cuya puerta ya está abierta, o una herramienta cuyo panel
-ya está reparado, ¿sigue distinguiendo estados si solo cambia *dónde* está en
-el suelo? Si no habilita ninguna acción futura, incluirla multiplica el espacio
-con permutaciones de objetos muertos. Justifique si las ignora y por qué eso
-no pierde el óptimo.
+Los cambios del entorno son monotónicos: las puertas no vuelven a cerrarse, los paneles reparados no vuelven a dañarse y las estaciones online no vuelven a offline.
 
-(completar)
+Una llave puede dejar de ser relevante cuando su puerta ya está abierta. Una herramienta puede dejar de ser relevante cuando ya reparó el único panel que la necesitaba. Estos objetos solo se ignoran después de comprobar que no son necesarios para otra acción futura.
 
----
+Esta reducción evita permutaciones de objetos muertos sin eliminar una posibilidad necesaria para un plan óptimo.
 
 ## Acciones
 
-Defina las acciones **internas** del agente (nombres libres). Para cada una:
-precondiciones, efectos, costo. Toda acción del mundo exige además
-`batería ≥ costo`.
+Las acciones internas representan operaciones del robot. Sus costos se toman siempre del escenario.
 
-Puede usar una tabla:
+| Acción | Precondiciones | Efectos | Costo |
+| --- | --- | --- | --- |
+| `MOVE(from, to)` | Existe un corredor, el robot está en `from`, la puerta requerida está abierta y hay batería suficiente. | Cambia la zona a `to` y descuenta el costo del corredor. | Costo del corredor |
+| `PICKUP(item)` | El objeto está en el suelo de la zona actual, hay capacidad disponible y batería suficiente. | Pasa el objeto del suelo a la carga y descuenta batería. | `action_costs.pickup` |
+| `DROP(item)` | El objeto está en la carga y hay batería suficiente. | Pasa el objeto de la carga al suelo de la zona actual y descuenta batería. | `action_costs.drop` |
+| `OPEN_DOOR(door)` | El robot está junto a la puerta, la puerta está cerrada y posee la llave correspondiente. | Abre la puerta y descuenta batería. | `action_costs.interact` |
+| `REPAIR(panel, material)` | El robot está en la zona del panel, tiene la herramienta requerida, tiene el material correcto y el panel está dañado. | Repara el panel, consume el material y descuenta batería. | `action_costs.interact` |
+| `ACTIVATE(station)` | El robot está en la zona de la estación, está offline y cumple sus dependencias. | Cambia la estación a online y descuenta batería. | `action_costs.interact` |
+| `RECHARGE(charger)` | El robot está en la zona del cargador, la batería no está llena y puede pagar el costo. | Descuenta el costo y restaura la batería máxima. | `action_costs.recharge` |
 
-```text
-Acción | Precondiciones | Efectos | Costo
-```
-
-(completar)
+Todas las acciones requieren que la batería sea mayor o igual al costo. Las acciones internas se traducen antes de responder para cumplir el contrato del frontend.
 
 ### `Applicable` interno vs legalidad del contrato
 
-El simulador dice cuándo un paso es **legal**. Su generador de sucesores dice
-qué acciones son **relevantes para buscar**. No tienen que ser el mismo conjunto.
+El simulador permite `DROP` en cualquier zona si el objeto está en la carga. Sin embargo, generar todos los `DROP` posibles produciría muchas ubicaciones innecesarias para los objetos.
 
-El contrato **permite** `DROP` en cualquier zona si el objeto está en la carga.
-Si su agente genera ese `DROP` en cada estado con carga, el espacio deja de ser
-«5 zonas y unas tareas» y pasa a ser «en cuál de las 5 zonas quedó cada objeto».
-Eso no se arregla cambiando `cargo_capacity` ni apagando la batería: el escenario
-es la fuente de verdad y el profesor probará otras instancias.
+La búsqueda genera `DROP` únicamente cuando la carga está llena o cuando un
+recurso pendiente de la zona actual no cabe. No se generan drops arbitrarios en
+todas las zonas.
 
-Usted puede (y se espera que) restrinja `DROP` —y cualquier otra acción— a los
-casos que un plan **óptimo** podría necesitar. Justifique que ningún plan de
-costo mínimo usa una acción que usted dejó de generar.
-
-(completar: en particular, cuándo genera `DROP` y por qué)
-
----
+Esta restricción es válida porque dejar un objeto en una zona sin utilidad no mejora la posición, la batería ni el progreso de la misión; solo agrega costo y crea estados adicionales.
 
 ## Modelo de transición
 
+El modelo es determinista y parcial:
+
 ```text
-s  --a-->  s'     solo si a ∈ Applicable(s)
+s --a--> s' solamente si a pertenece a Applicable(s)
 ```
 
-`Result` es determinista y parcial. Qué puede cambiar: zona, carga/suelo,
-batería, entorno persistente. Qué se preserva. Si canonicaliza el estado tras
-una acción, dígalo aquí.
+La transición comprueba las precondiciones, aplica los efectos y descuenta el costo de la acción. Puede cambiar la zona, la batería, la carga, la posición de objetos, las puertas, los paneles y las estaciones. El escenario y sus constantes no cambian.
 
-(completar)
+Después de cada transición se canonicaliza el estado. Esto permite que la búsqueda de grafos reconozca configuraciones físicas equivalentes aunque se hayan alcanzado por historias diferentes.
 
----
+La implementación también compacta el suelo después de cada transición:
+elimina objetos que ya no pueden abrir puertas ni participar en reparaciones
+pendientes. La carga no se elimina automáticamente porque su peso todavía puede
+afectar la capacidad y debe liberarse mediante `DROP`.
 
 ## Prueba de meta
 
+La prueba de meta se define como:
+
 ```text
-Goal(s) ⟺ …
+Goal(s) <=> todas las estaciones de goal.stations_online están ONLINE
 ```
 
-La misión se verifica sobre el **estado final del mundo**, no sobre haber
-ejecutado una lista de tareas. ¿Las puertas y los paneles son parte de la meta
-o solo medios?
-
-(completar)
-
----
+La meta se verifica sobre el estado final del mundo. Las puertas abiertas y los paneles reparados son medios para alcanzar la misión, no necesariamente condiciones finales independientes.
 
 ## Función de costo
 
+El costo acumulado de un nodo es:
+
 ```text
-g(n) = …
+g(n) = suma de los costos oficiales de las acciones desde el estado inicial hasta n
 ```
 
-Debe ser la suma de los **costos oficiales** del escenario (no el número de
-pasos). Explique por qué minimizar pasos no es lo mismo que minimizar costo
-en este mundo (hay corredores baratos y caros).
+Los movimientos usan el costo del corredor. `PICKUP`, `DROP`, interacción y recarga usan los valores de `action_costs` del escenario.
 
-(completar)
-
----
+Minimizar la cantidad de pasos no es lo mismo que minimizar el costo: un plan con menos acciones puede usar corredores caros. La solución preferida es la que alcanza la meta con menor costo total.
 
 ## Estrategia de búsqueda
 
-Elija una estrategia **vista en clase** y justifíquela con las propiedades
-reales del problema (costos heterogéneos, plan de menor costo, espacio finito).
+### UCS con búsqueda de grafos
 
-Discuta:
+Se utilizará búsqueda de costo uniforme (UCS) con búsqueda de grafos. UCS es adecuada porque los costos son heterogéneos, no negativos y la misión exige una solución de menor costo.
 
-- completitud
-- optimalidad (¿la prueba de meta se hace al extraer o al generar?)
-- costo de camino
-- tiempo y espacio (el `b` peligroso no es el grado del mapa: es cuántos
-  `DROP`/`PICKUP` genera por estado)
-- cuándo se rompen las garantías (costos 0 o negativos, estados mal
-  canonicalizados, OPEN que no se vacía)
+La búsqueda mantiene:
 
-Graph Search exige una lista CLOSED sobre estados **canónicos**. Explique cómo
-evita reexplorar la misma situación física.
+- `OPEN`: cola de prioridad ordenada por `g(n)`.
+- `CLOSED`: estados canónicos ya explorados o dominados.
+- `Nodo`: estado, costo acumulado, padre y acción anterior.
 
-(completar)
+Se inserta el estado inicial con costo cero. En cada iteración se extrae el nodo de menor costo, se descartan entradas obsoletas y se comprueba la meta. La meta se comprueba al extraer, porque en ese momento UCS garantiza que no existe una solución más barata pendiente en `OPEN`.
+
+Si se encuentra la meta, se reconstruye el plan siguiendo los padres. Si `OPEN` queda vacío, se devuelve `solution_found: false` con `steps: []`.
+
+### Búsqueda satisficiente para la integración
+
+Para la ejecución del frontend se utiliza una búsqueda satisficiente guiada por
+el progreso y el costo. Esta estrategia prioriza recoger recursos, reparar
+paneles y activar estaciones, pero no garantiza el menor costo. Su objetivo es
+encontrar rápidamente cualquier plan legal que alcance la meta. La prioridad
+penaliza el costo acumulado y las acciones caras, especialmente movimientos y
+recargas.
+
+UCS se conserva para demostrar completitud y optimalidad en los casos de prueba
+con costos y rutas alternativas. Ambas estrategias usan el mismo estado
+canónico, las mismas transiciones y la misma poda de estados.
+
+### Poda de estados y dominancia
+
+La primera poda consiste en canonicalizar los estados. Si dos rutas alcanzan la misma situación física, no se exploran como estados diferentes.
+
+También se aplica dominancia. Para una misma configuración de zona, carga, suelo y entorno, un estado `A` domina a otro `B` cuando:
+
+```text
+g(A) <= g(B) y bateria(A) >= bateria(B)
+```
+
+El estado `B` se elimina porque llegó con igual o mayor costo y tiene igual o menor batería. Para cada configuración se puede conservar una frontera de pares `(costo, bateria)` y descartar los pares dominados.
+
+También se podan acciones que no generan progreso: abrir puertas abiertas, reparar paneles reparados, activar estaciones online, recargar con batería llena, recoger objetos que no caben y soltar objetos sin necesidad futura.
+
+Estas podas reducen el factor de ramificación. Para UCS, la dominancia conserva
+la posibilidad de encontrar el menor costo; para la búsqueda satisficiente, la
+prioridad de costo es una preferencia práctica y no una garantía de optimalidad.
+
+### Propiedades de UCS
+
+UCS es completa si el espacio es finito y los costos son no negativos. Es óptima si la meta se comprueba al extraer el nodo de menor costo.
+
+El tiempo y el espacio dependen de la cantidad de sucesores generados, no únicamente del número de zonas. `DROP`, `PICKUP` y la ubicación de objetos pueden hacer crecer mucho el espacio.
+
+Las garantías pueden fallar si existen costos negativos, estados mal canonicalizados, una prueba de meta realizada demasiado pronto o una generación ilimitada de acciones irrelevantes.
 
 ### Batería como recurso
 
-La batería **sí** va en el estado (§2.1). Eso no implica explorar todos los
-paseos que solo gastan energía. Si dos caminos llegan a la **misma**
-configuración del mundo (zona, carga, suelo, entorno) y uno trae **más batería
-residual** a un **costo menor o igual**, el otro no puede mejorar ningún plan
-futuro: está dominado. Tratar cada nivel de batería como un mundo distinto,
-sin esa observación, hace que UCS recorra detours inútiles hasta agotar
-memoria. Justifique cómo CLOSED aprovecha (o no) esta dominancia.
+La batería sí forma parte del estado porque limita las acciones futuras. No se deben explorar todos los recorridos que solo gastan energía. Si dos caminos llegan a la misma configuración física y uno tiene menor o igual costo y mayor o igual batería, el otro está dominado y se elimina.
 
-(completar)
+## Formulación y tamaño del espacio
 
----
+### 1. Por qué el espacio puede crecer mucho
 
-## Formulación y tamaño del espacio (obligatorio)
+Aunque el mapa tenga pocas zonas y el robot transporte pocos objetos, cada objeto puede estar en la carga o en el suelo de diferentes zonas. Al combinar esas posiciones con la batería y los estados de puertas, paneles y estaciones, aparecen muchas configuraciones.
 
-El mapa visible es pequeño. El espacio de estados **no** lo es, si se formula
-mal. Responda con sus palabras:
+### 2. Papel de `DROP`
 
-1. ¿Por qué «5 zonas, ~10 objetos, capacidad 3» puede generar millones de nodos
-   en un UCS ingenuo?
-2. ¿Qué papel tiene `DROP` en esa explosión?
-3. ¿Qué podas o abstracciones aplicó y por qué **no pierden el óptimo**
-   (*sound*)?
-4. ¿Por qué **no** es solución subir la capacidad, bajar las estaciones o
-   ignorar la batería?
+`DROP` aumenta el espacio porque cada objeto puede quedar en varias zonas. Si se generan todos los drops legales, UCS explora historias que no ayudan a la misión y puede tardar demasiado.
 
-(completar)
+### 3. Podas y abstracciones
+
+La implementación utiliza estados canónicos, equivalencia de materiales por
+tipo, compactación de objetos del suelo que ya no afectan el futuro, generación
+restringida de `DROP` y eliminación de estados dominados por costo y batería.
+
+Estas decisiones son válidas porque conservan las acciones necesarias para abrir puertas, reparar paneles, recargar, activar estaciones y alcanzar la meta con menor costo.
+
+### 4. Por qué no se modifica el escenario
+
+No se debe aumentar la capacidad, ignorar la batería ni eliminar estaciones para hacer más fácil la instancia actual. El escenario es la fuente de verdad y el profesor puede probar otras posiciones, costos, recursos y situaciones sin solución.
+
+La solución debe trabajar con el escenario recibido, detectar correctamente el fracaso y devolver un plan que cumpla el contrato del backend.
+
+## Validación previa en el backend
+
+Antes de probar la integración con el frontend se crearán tests dentro de
+`backend/tests`. Estos tests validarán el agente directamente sobre el modelo
+del mundo, sin depender de la interfaz visual.
+
+Se comprobará que el agente:
+
+- encuentre una solución legal y alcance todas las estaciones objetivo;
+- devuelva `solution_found: false` cuando no exista una solución;
+- respete la batería, la capacidad, las puertas, los materiales y las
+	dependencias entre estaciones;
+- calcule `total_cost` como la suma de los costos oficiales;
+- produzca estados equivalentes de forma canónica;
+- descarte estados dominados y no genere `DROP` irrelevantes;
+- termine en un tiempo razonable y no explore indefinidamente estados
+	repetidos.
+
+También se medirán el tiempo de ejecución, la cantidad de estados expandidos y
+el costo del plan encontrado. Primero se corregirán los problemas detectados en
+estas pruebas del backend. Después se ejecutará el plan mediante el frontend
+para comprobar únicamente la comunicación y la visualización de la solución.
+
+no se puede modificar scenarios

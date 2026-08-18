@@ -1,4 +1,4 @@
-"""FastAPI backend — demo solver for frontend integration testing."""
+"""API FastAPI del planificador UCS."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from demo_plan import build_demo_plan
+from ucs_solver import solve_satisficing
 
 app = FastAPI(title="Emergency Control API", version="1.0.0")
 
@@ -21,6 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# El escenario se carga desde project/scenarios sin modificarlo.
 SCENARIO_PATH = Path(__file__).resolve().parents[2] / "scenarios" / "scenario.json"
 
 
@@ -41,10 +42,8 @@ def get_scenario() -> dict[str, Any]:
 
 @app.post("/api/solve")
 def solve(scenario: dict[str, Any]) -> dict[str, Any]:
-    """Return a demo plan consistent with the provided scenario.
-
-    Students replace this with a real UCS/search agent. The response contract
-    must remain: solution_found, total_cost, steps[{op, cost, ...}].
-    """
+    """Busca una solución válida rápidamente y conserva el contrato de la API."""
+    # La API usa la búsqueda satisficiente para que el frontend reciba un plan
+    # válido rápidamente; UCS queda disponible para validar optimalidad.
     data = scenario if scenario else _load_default_scenario()
-    return build_demo_plan(data)
+    return solve_satisficing(data)

@@ -1,78 +1,187 @@
 # Proyecto — Emergency Control
 
-El diseño interno de la IA lo escribe usted en [`design.md`](design.md) **antes**
-de implementar. Ese archivo ya trae las subsecciones que debe completar
-(estado, acciones, `DROP`, batería, tamaño del espacio). El enunciado está en
-el `README.MD` de la raíz; las reglas del mundo, en [`../CONTRATO.md`](../CONTRATO.md).
+Este proyecto implementa un planificador autónomo para una misión de control de
+emergencias. El backend genera un plan válido a partir del escenario y el
+frontend lo ejecuta en una simulación 3D.
+
+El backend utiliza una búsqueda satisficiente para encontrar rápidamente una
+solución válida. También conserva UCS para validar estados equivalentes, rutas
+alternativas y diferencias de costo. La búsqueda satisficiente no garantiza el
+menor costo, pero utiliza el costo como criterio de preferencia y aplica poda de
+estados.
 
 ## Estructura
 
 ```text
 project/
-├── frontend/          # React + R3F — simulación 3D voxel
-├── backend/           # FastAPI — POST /api/solve (plan demo)
-├── scenarios/         # scenario.json — fuente de verdad
-├── design.md
-└── README.md
+├── backend/           # FastAPI y agente de búsqueda
+├── frontend/          # React, TypeScript, Vite y simulación 3D
+├── scenarios/         # scenario.json, fuente de verdad del mundo
+├── design.md          # diseño del estado, acciones y búsquedas
+└── README.md          # estas instrucciones
 ```
 
-## Cómo levantar (tú)
+## Requisitos
 
-Abre **dos terminales**.
+- Python 3.10 o posterior.
+- Node.js y npm.
+- Windows PowerShell, macOS Terminal o Linux Shell.
 
-### Terminal 1 — Backend
+## 1. Instalar dependencias del backend
+
+Desde la carpeta raíz del repositorio:
+
+```powershell
+cd project/backend
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+```
+
+En macOS o Linux:
 
 ```bash
 cd project/backend
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn main:app --app-dir src --port 8000
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-Comprobar: http://127.0.0.1:8000/api/health
+## 2. Iniciar el backend
 
-### Terminal 2 — Frontend
+Con el entorno virtual activado y ubicados en `project/backend`:
+
+```powershell
+py -m uvicorn main:app --app-dir src --reload --port 8000
+```
+
+En macOS o Linux:
 
 ```bash
+python -m uvicorn main:app --app-dir src --reload --port 8000
+```
+
+Comprobar que funciona:
+
+```text
+http://127.0.0.1:8000/api/health
+```
+
+La respuesta esperada es:
+
+```json
+{"status":"ok"}
+```
+
+La documentación interactiva de FastAPI está en:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## 3. Instalar e iniciar el frontend
+
+Abre una segunda terminal:
+
+```powershell
 cd project/frontend
 npm install
 npm run dev
 ```
 
-Abrir: http://localhost:5173
+Abre la dirección mostrada por Vite, normalmente:
 
-Pulsa **EXECUTE PLAN**. El frontend llama a `/api/solve` (proxy Vite → puerto 8000) y reproduce el plan casilla a casilla.
-
-Hasta que conecte su agente, `/api/solve` devuelve el plan artesanal de `demo_plan.py` (sin búsqueda). Ese plan existe para probar el frontend: es legal, no es necesariamente el de menor costo, y usa `DROP` porque la capacidad es 3. No tome esos `DROP` como «hay que soltar en cualquier zona»: son un ejemplo de *presión de carga*.
-
-### Tests del plan demo
-
-```bash
-cd project/backend
-.\.venv\Scripts\activate
-python tests/test_demo_plan.py
+```text
+http://localhost:5173
 ```
 
-## Contrato visual vs agente (importante)
+El frontend utiliza el proxy de Vite para enviar `/api/*` al backend en el
+puerto `8000`. Por eso ambos procesos deben estar ejecutándose.
 
-La versión oficial y completa de este contrato (esquema JSON, acciones de `INTERACT`, reglas del mundo y costos) está en `../CONTRATO.md`, que forma parte del enunciado.
+## 4. Ejecutar el agente directamente
 
-El enunciado fija **4 operaciones visuales** que el frontend entiende:
+Para probar el agente sin abrir el frontend:
+
+```powershell
+cd project/backend
+$env:PYTHONPATH = "src"
+py -c "from main import solve; from simulator import load_scenario; result=solve(load_scenario()); print(result)"
+```
+
+La respuesta debe incluir:
+
+```text
+solution_found: True
+total_cost: ...
+steps: [...]
+```
+
+## 5. Probar una misión
+
+Con backend y frontend ejecutándose, abre `http://localhost:5173` y pulsa
+`EXECUTE PLAN`.
+
+El frontend solicitará un plan a `POST /api/solve`, ejecutará sus pasos y
+mostrará el resultado en el registro de la interfaz.
+
+También puedes probar la API desde PowerShell:
+
+```powershell
+$scenario = Invoke-RestMethod http://127.0.0.1:8000/api/scenario
+$body = $scenario | ConvertTo-Json -Depth 20
+$result = Invoke-RestMethod http://127.0.0.1:8000/api/solve -Method Post -ContentType "application/json" -Body $body
+$result.solution_found
+$result.total_cost
+$result.steps.Count
+$result.message
+```
+
+## 6. Ejecutar las pruebas del backend
+
+Las pruebas cubren estados equivalentes, información relevante, costos
+diferentes, ausencia de solución, rutas alternativas y rendimiento:
+
+```powershell
+cd project/backend
+$env:PYTHONPATH = "src"
+py tests/test_ucs_solver.py
+```
+
+La salida muestra cada caso y sus métricas. Debe terminar con:
+
+```text
+Resultado: todos los casos de validación UCS pasaron.
+```
+
+## 7. Interpretar el resultado
+
+- `solution_found=True`: se encontró un plan ejecutable.
+- `solution_found=False`: no se encontró una solución dentro del límite de
+	búsqueda o el escenario no tiene solución.
+- `total_cost`: suma de los costos oficiales de todos los pasos.
+- `steps`: acciones que ejecutará el frontend.
+- `message`: estrategia utilizada y cantidad de estados expandidos.
+
+Durante la ejecución visual, el registro debe terminar con:
+
+```text
+MISSION COMPLETE — all stations ONLINE
+```
+
+También se muestran la batería restante, el costo gastado y las acciones
+ejecutadas. Si aparece `API ERROR`, revisa que el backend esté activo en el
+puerto `8000`. Si aparece un error de una acción, el plan fue rechazado por una
+regla del simulador y el mensaje del registro indica la causa.
+
+## Contrato visual
+
+El plan solo utiliza estas operaciones:
 
 ```text
 MOVE | PICKUP | DROP | INTERACT
 ```
 
-`REPAIR`, `ACTIVATE`, `OPEN_DOOR`, `RECHARGE` **no son ops del plan de alto nivel**: son el campo `action` dentro de un paso `INTERACT`.
-
-Ejemplo de lo que debe devolver `/api/solve`:
-
-```json
-{ "op": "INTERACT", "target": "PANEL_A", "action": "REPAIR", "consumes": "FUSE", "cost": 2 }
-```
-
-- **Agente (estudiante):** puede modelar acciones internas (`REPAIR_PANEL_A`, etc.) y luego **traducirlas** a `MOVE`/`PICKUP`/`DROP`/`INTERACT`.
-- **Frontend / banco de pruebas:** solo ejecuta esas 4 ops. El log muestra `INTERACT REPAIR ...` para dejar claro el `op` + el `action`.
-
-Así no hay contradicción: la capa visual no define la IA; solo anima el plan ya traducido.
+Dentro de `INTERACT`, las acciones válidas son `OPEN_DOOR`, `REPAIR`,
+`ACTIVATE` y `RECHARGE`. Las reglas completas están en
+[`CONTRATO.md`](../CONTRATO.md), y el diseño del agente en
+[`design.md`](design.md).

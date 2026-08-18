@@ -2,10 +2,11 @@
 
 Python API that exposes `POST /api/solve`.
 
-The default implementation returns a **demo plan** (no search / no AI) so the
-frontend can be tested end-to-end. Students replace the solve handler with
-their search agent. Do not «fix» `scenario.json` (capacity, battery, rooms)
-to make UCS finish: formulate `Applicable` instead. See `project/design.md`.
+The backend exposes a fast satisficing search for the frontend and keeps UCS in
+the solver module for the optimality tests. Both use canonical states and
+state-pruning. The frontend plan is valid but is not guaranteed to have minimum
+cost. Do not «fix» `scenario.json` (capacity, battery, rooms) to make the
+search finish: formulate `Applicable` instead. See `project/design.md`.
 
 ## Run
 
@@ -17,7 +18,7 @@ python -m venv .venv
 # macOS/Linux:
 # source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn src.main:app --reload --app-dir src --port 8000
+uvicorn main:app --reload --app-dir src --port 8000
 ```
 
 Or from `backend/src`:
@@ -29,7 +30,12 @@ uvicorn main:app --reload --port 8000
 
 ## Tests
 
-```bash
+```powershell
 cd project/backend
-python tests/test_demo_plan.py
+$env:PYTHONPATH = "src"
+python tests/test_ucs_solver.py
 ```
+
+The validation output reports each required case, the number of steps, cost,
+expanded states and elapsed time. The frontend should only be tested after the
+backend suite passes.
